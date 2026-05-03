@@ -1,6 +1,6 @@
-# SPDX-License-Identifier: MIT
-# Original work: Copyright (c) weirdgyn — https://github.com/weirdgyn/viastitching
-# Modifications: Copyright (c) 2025 Daniel Stelian Dobre
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Original work: Copyright (C) JS Reynaud — https://github.com/jsreynaud/kicad-action-scripts
+# Modifications: Copyright (C) 2025 Daniel Stelian Dobre
 
 import pcbnew
 from .ViaStitching import RunViaStitchingInteractive

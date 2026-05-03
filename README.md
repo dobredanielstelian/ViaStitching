@@ -22,7 +22,7 @@ Useful for improving GND plane integrity, shielding, and thermal dissipation.
 ## Screenshots
 
 ![Via Stitching dialog](images/dialog.png)
-![Hexagonal pattern example](images/vias.png)
+![Hexagonal pattern example](images/hexagonal.png)
 
 ---
 
@@ -89,7 +89,7 @@ To remove them:
 
 ## License
 
-MIT License — see [LICENSE](LICENSE).
+GPL-3.0-or-later — see [LICENSE](LICENSE).
 
-Original work by [weirdgyn](https://github.com/weirdgyn/viastitching).  
+Original work by [JS Reynaud](https://github.com/jsreynaud/kicad-action-scripts).  
 KiCad 10 port and improvements by Daniel Stelian Dobre.

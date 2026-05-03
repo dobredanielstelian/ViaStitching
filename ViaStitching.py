@@ -1,14 +1,14 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 #
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-3.0-or-later
 #
 # ViaStitching — KiCad 10 action plugin
 #
-# Original work: Copyright (c) weirdgyn
-#   https://github.com/weirdgyn/viastitching
+# Original work: Copyright (C) JS Reynaud
+#   https://github.com/jsreynaud/kicad-action-scripts
 #
-# Modifications: Copyright (c) 2025 Daniel Stelian Dobre
+# Modifications: Copyright (C) 2025 Daniel Stelian Dobre
 #   - KiCad 10 API compatibility (GetFilledPolysList, GetLocalClearance,
 #     GetBoardPolygonOutlines, PCB_TEXT class name, plugin registration)
 #   - Proper clearance-aware collision detection using SEG.Distance and
@@ -16,6 +16,11 @@
 #   - Via-vs-via collision check for same-net existing vias
 #   - Square, Staggered and Hexagonal placement patterns
 #   - Interactive net dropdown populated from the live board
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 #
 
 from __future__ import print_function
