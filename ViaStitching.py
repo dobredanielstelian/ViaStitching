@@ -8,7 +8,7 @@
 # Original work: Copyright (C) JS Reynaud
 #   https://github.com/jsreynaud/kicad-action-scripts
 #
-# Modifications: Copyright (C) 2025 Daniel Stelian Dobre
+# Modifications: Copyright (C) 2026 Daniel Stelian Dobre
 #   - KiCad 10 API compatibility (GetFilledPolysList, GetLocalClearance,
 #     GetBoardPolygonOutlines, PCB_TEXT class name, plugin registration)
 #   - Proper clearance-aware collision detection using SEG.Distance and
