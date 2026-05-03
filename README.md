@@ -21,7 +21,8 @@ Useful for improving GND plane integrity, shielding, and thermal dissipation.
 
 ## Screenshots
 
-> *(add screenshots here)*
+![Via Stitching dialog](images/dialog.png)
+![Hexagonal pattern example](images/vias.png)
 
 ---
 
