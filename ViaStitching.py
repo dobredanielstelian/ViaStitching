@@ -48,6 +48,7 @@ class ViaStitchingDialog(wx.Dialog):
     def __init__(self, nets=None, board_clearance_mm=0.2):
         super().__init__(None, title="Via Stitching Parameters")
 
+        self._nets = sorted(nets) if nets else []
         main = wx.BoxSizer(wx.VERTICAL)
 
         def add_row(label, ctrl):
@@ -71,7 +72,7 @@ class ViaStitchingDialog(wx.Dialog):
         # Net selector: dropdown from board if available, text fallback
         if nets:
             default = "GND" if "GND" in nets else nets[0]
-            self.netname = wx.ComboBox(self, value=default, choices=nets,
+            self.netname = wx.ComboBox(self, value=default, choices=self._nets,
                                        style=wx.CB_DROPDOWN | wx.CB_SORT)
         else:
             self.netname = wx.TextCtrl(self, value="GND")
@@ -83,13 +84,88 @@ class ViaStitchingDialog(wx.Dialog):
         self.pattern.SetSelection(0)
         add_row("Pattern:", self.pattern)
 
+        # Grouping checkbox
+        self.group_vias = wx.CheckBox(self, label="Group all vias (enables bulk delete, disables individual delete)")
+        self.group_vias.SetValue(False)
+        main.Add(self.group_vias, 0, wx.ALL, 8)
+
+        # ── Extra per-net clearance rules ──────────────────────────────────
+        box = wx.StaticBox(self, label="Extra clearance rules (nets with stricter spacing)")
+        box_sz = wx.StaticBoxSizer(box, wx.VERTICAL)
+
+        # Column header
+        hdr = wx.BoxSizer(wx.HORIZONTAL)
+        hdr.Add(wx.StaticText(self, label="Net"), 1, wx.LEFT, 4)
+        hdr.Add(wx.StaticText(self, label="Min clearance (mm)"), 0, wx.RIGHT, 36)
+        box_sz.Add(hdr, 0, wx.EXPAND | wx.TOP, 2)
+
+        self._rules_sizer = wx.BoxSizer(wx.VERTICAL)
+        self._rule_rows = []          # list of (row_sizer, net_ctrl, clr_ctrl, del_btn)
+        box_sz.Add(self._rules_sizer, 0, wx.EXPAND)
+
+        add_btn = wx.Button(self, label="+ Add rule")
+        add_btn.Bind(wx.EVT_BUTTON, lambda e: self._add_rule_row())
+        box_sz.Add(add_btn, 0, wx.ALL, 4)
+
+        main.Add(box_sz, 0, wx.EXPAND | wx.ALL, 5)
+        # ──────────────────────────────────────────────────────────────────
+
         btns = self.CreateButtonSizer(wx.OK | wx.CANCEL)
         main.Add(btns, 0, wx.ALL | wx.ALIGN_CENTER, 10)
 
         self.SetSizer(main)
         self.Fit()
-        self.SetMinSize((380, 260))
+        self.SetMinSize((440, 320))
         self.Centre()
+
+    # ── Extra-rule row helpers ─────────────────────────────────────────────
+
+    def _add_rule_row(self, net="", clearance_mm="0.200"):
+        """Append one (net, clearance) row to the extra-rules section."""
+        row_sz = wx.BoxSizer(wx.HORIZONTAL)
+
+        net_ctrl = wx.ComboBox(self, value=net, choices=self._nets,
+                               style=wx.CB_DROPDOWN | wx.CB_SORT, size=(170, -1))
+        clr_ctrl = wx.TextCtrl(self, value=str(clearance_mm), size=(75, -1))
+        del_btn  = wx.Button(self, label=u"✕", size=(28, -1))   # ✕
+
+        row_sz.Add(net_ctrl, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 2)
+        row_sz.Add(clr_ctrl, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 2)
+        row_sz.Add(del_btn,  0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 2)
+
+        entry = (row_sz, net_ctrl, clr_ctrl, del_btn)
+        self._rule_rows.append(entry)
+        self._rules_sizer.Add(row_sz, 0, wx.EXPAND)
+
+        del_btn.Bind(wx.EVT_BUTTON,
+                     lambda e, ent=entry: self._remove_rule_row(ent))
+
+        self.Layout()
+        self.Fit()
+
+    def _remove_rule_row(self, entry):
+        """Remove an extra-rule row and refresh layout."""
+        row_sz, net_ctrl, clr_ctrl, del_btn = entry
+        self._rule_rows = [r for r in self._rule_rows if r is not entry]
+        self._rules_sizer.Detach(row_sz)
+        net_ctrl.Destroy()
+        clr_ctrl.Destroy()
+        del_btn.Destroy()
+        self.Layout()
+        self.Fit()
+
+    def GetExtraRules(self):
+        """Return [(net_name, clearance_mm), …] for every filled-in rule row."""
+        rules = []
+        for _, net_ctrl, clr_ctrl, _ in self._rule_rows:
+            net = net_ctrl.GetValue().strip()
+            if not net:
+                continue
+            try:
+                rules.append((net, float(clr_ctrl.GetValue())))
+            except ValueError:
+                pass
+        return rules
 
 
 class ViaObject:
@@ -147,6 +223,8 @@ class FillArea:
         self.delete_vias = False
         self.via_through_areas = False
         self.same_net_tracks = False
+        self.group_vias = False
+        self.extra_clearances = {}
         self.tmp_dir = None
         self.parent_area = None
         self.pcb_group = None
@@ -249,6 +327,10 @@ class FillArea:
         self.delete_vias = True
         return self
 
+    def SetGroupVias(self, v):
+        self.group_vias = bool(v)
+        return self
+
     def SetClearanceMM(self, s):
         self.clearance = float(FromMM(s))
         return self
@@ -273,6 +355,34 @@ class FillArea:
                 self.clearance = float(board_min)
         except Exception:
             pass
+
+    def SetExtraNetClearances(self, rules):
+        """Set per-net clearance overrides from the dialog's extra-rules table.
+
+        rules — list of (net_name: str, clearance_mm: float) tuples entered by
+                the user.  Any net not listed falls back to self.clearance (the
+                board minimum).  Values below the board minimum are ignored.
+        """
+        self.extra_clearances = {
+            name: int(FromMM(mm))
+            for name, mm in rules
+            if name
+        }
+        return self
+
+    def _build_net_clearance_map(self):
+        """Return {net_name: effective_clearance_iu} from user-specified extra rules.
+
+        Only the nets the user explicitly added appear in the map; every other net
+        gets looked up with .get(name, min_gap) which falls back to the board minimum.
+        The value stored is max(board_minimum, user_value) so the map can never make
+        a net *less* strict than the board rules require.
+        """
+        base = int(self.clearance)
+        return {
+            name: max(base, iu)
+            for name, iu in self.extra_clearances.items()
+        }
 
     # -------------------------------------------------------------------------
     # Debug helpers
@@ -338,7 +448,8 @@ STEP         = '-'
             m.SetIsFree(True)
 
             self.pcb.Add(m)
-            self.pcb_group.AddItem(m)
+            if self.pcb_group is not None:
+                self.pcb_group.AddItem(m)
             return m
         else:
             wxPrint("Unable to find a valid parent area (zone)")
@@ -373,7 +484,12 @@ STEP         = '-'
                 continue  # same net, not a keepout — no conflict
 
             # How close can the via centre get to this zone's boundary?
-            required_gap = int(max(self.clearance, area_clearance) + self.size / 2)
+            # Use the stricter of: board minimum, zone local override, and the
+            # zone net's net-class clearance (e.g. an 'Earth' net with 1 mm class).
+            nc_clearance = 0
+            if hasattr(self, '_net_clearance_map'):
+                nc_clearance = self._net_clearance_map.get(area.GetNetname(), 0)
+            required_gap = int(max(self.clearance, area_clearance, nc_clearance) + self.size / 2)
 
             outline = area.Outline()
             if outline is None:
@@ -457,6 +573,7 @@ STEP         = '-'
 
     def ConcentricFillVias(self):
         self._resolve_clearance()
+        self._net_clearance_map = self._build_net_clearance_map()
         wxPrint("Calculate placement areas")
 
         zones = [zone for zone in self.pcb.Zones() if zone.GetNetname() == self.netname]
@@ -553,32 +670,45 @@ STEP         = '-'
         # Must be first: bumps self.clearance to board-rule minimum so every
         # downstream check automatically respects DRC.
         self._resolve_clearance()
+        # Build per-net clearance map (net class clearances).  Stored on self so
+        # CheckViaInAllAreas can use it without an extra argument.
+        self._net_clearance_map = self._build_net_clearance_map()
 
         VIA_GROUP_NAME = "ViaStitching {}".format(self.netname)
 
-        if self.debug:
-            print("Enumerate groups")
+        # Reset group handle each run; rebuilt below only when grouping is on.
+        self.pcb_group = None
 
-        for g in self.pcb.Groups():
-            if g.GetName() == VIA_GROUP_NAME:
-                if self.debug:
-                    print("Group {} Found !".format(VIA_GROUP_NAME))
-                self.pcb_group = g
+        if self.group_vias:
+            if self.debug:
+                print("Enumerate groups")
+            for g in self.pcb.Groups():
+                if g.GetName() == VIA_GROUP_NAME:
+                    if self.debug:
+                        print("Group {} Found !".format(VIA_GROUP_NAME))
+                    self.pcb_group = g
 
-        if self.delete_vias:
+            if self.delete_vias:
+                wx.MessageBox(
+                    "To delete vias:\n"
+                    " - select one of the generated vias to select the group of vias named {}\n"
+                    " - hit delete key\n"
+                    " - That's all !".format(VIA_GROUP_NAME),
+                    "Information",
+                )
+                return
+
+            if self.pcb_group is None:
+                self.pcb_group = PCB_GROUP(self.pcb)
+                self.pcb_group.SetName(VIA_GROUP_NAME)
+                self.pcb.Add(self.pcb_group)
+        elif self.delete_vias:
             wx.MessageBox(
-                "To delete vias:\n"
-                " - select one of the generated vias to select the group of vias named {}\n"
-                " - hit delete key\n"
-                " - That's all !".format(VIA_GROUP_NAME),
+                "Grouping is disabled — vias are placed individually.\n"
+                "Select and delete unwanted vias directly in the PCB editor.",
                 "Information",
             )
             return
-
-        if self.pcb_group is None:
-            self.pcb_group = PCB_GROUP(self.pcb)
-            self.pcb_group.SetName(VIA_GROUP_NAME)
-            self.pcb.Add(self.pcb_group)
 
         if self.fill_type in (
             self.FILL_TYPE_CONCENTRIC,
@@ -760,18 +890,9 @@ STEP         = '-'
                     # Same-net trace treated as obstacle: physical overlap only
                     min_dist = via_r + t_r
             else:
-                # Different net: full via-edge-to-track-edge clearance.
-                # Also honour the track's own net-class clearance if it is
-                # stricter than the board-level minimum.
-                track_gap = min_gap
-                try:
-                    tn = track.GetNet()
-                    if tn:
-                        nc = tn.GetNetClass()
-                        if nc:
-                            track_gap = max(track_gap, nc.GetClearance())
-                except Exception:
-                    pass
+                # Different net: use the pre-built per-net clearance (already
+                # accounts for net-class rules like a 1 mm Earth clearance).
+                track_gap = self._net_clearance_map.get(track.GetNetname(), min_gap)
                 min_dist = via_r + t_r + track_gap
 
             seg = SEG(track.GetStart(), track.GetEnd())
@@ -804,7 +925,11 @@ STEP         = '-'
         pad_obstacles = []
         for pad in all_pads:
             same = pad.GetNetname() == self.netname
-            margin = via_r if same else via_r + min_gap
+            if same:
+                margin = via_r
+            else:
+                pad_gap = self._net_clearance_map.get(pad.GetNetname(), min_gap)
+                margin = via_r + pad_gap
             copper_bbox = pad.GetBoundingBox().GetInflated(int(margin))
 
             # Drill check: only TH / NPTH pads have a drill size
@@ -930,7 +1055,9 @@ def RunViaStitchingInteractive():
     pattern_map = {0: FillArea.PATTERN_SQUARE,
                    1: FillArea.PATTERN_STAGGERED,
                    2: FillArea.PATTERN_HEXAGONAL}
-    pattern = pattern_map.get(dlg.pattern.GetSelection(), FillArea.PATTERN_SQUARE)
+    pattern     = pattern_map.get(dlg.pattern.GetSelection(), FillArea.PATTERN_SQUARE)
+    group       = dlg.group_vias.GetValue()
+    extra_rules = dlg.GetExtraRules()
     dlg.Destroy()
 
     fa = FillArea()
@@ -940,6 +1067,8 @@ def RunViaStitchingInteractive():
     fa.SetStepMM(spacing)
     fa.SetClearanceMM(clearance)
     fa.SetPattern(pattern)
+    fa.SetGroupVias(group)
+    fa.SetExtraNetClearances(extra_rules)
 
     fa.Run()
 
