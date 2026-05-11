@@ -45,7 +45,7 @@ def wxPrint(msg):
 
 
 class ViaStitchingDialog(wx.Dialog):
-    def __init__(self, nets=None):
+    def __init__(self, nets=None, board_clearance_mm=0.2):
         super().__init__(None, title="Via Stitching Parameters")
 
         main = wx.BoxSizer(wx.VERTICAL)
@@ -64,6 +64,9 @@ class ViaStitchingDialog(wx.Dialog):
 
         self.spacing = wx.TextCtrl(self, value="2.54")
         add_row("Spacing (mm):", self.spacing)
+
+        self.clearance = wx.TextCtrl(self, value="{:.3f}".format(board_clearance_mm))
+        add_row("Min Clearance (mm):", self.clearance)
 
         # Net selector: dropdown from board if available, text fallback
         if nets:
@@ -250,6 +253,27 @@ class FillArea:
         self.clearance = float(FromMM(s))
         return self
 
+    def _resolve_clearance(self):
+        """Bump self.clearance up to the board-level minimum from design rules.
+
+        Called at the start of Run() and ConcentricFillVias() so that every
+        downstream check automatically uses the stricter of (a) what the user
+        asked for and (b) what the board rules require.
+        """
+        if self.pcb is None:
+            return
+        try:
+            board_min = self.pcb.GetDesignSettings().m_MinClearance
+            if board_min > self.clearance:
+                wxPrint(
+                    "ViaStitching: clearance raised to board minimum {:.3f} mm".format(
+                        ToMM(board_min)
+                    )
+                )
+                self.clearance = float(board_min)
+        except Exception:
+            pass
+
     # -------------------------------------------------------------------------
     # Debug helpers
     # -------------------------------------------------------------------------
@@ -432,6 +456,7 @@ STEP         = '-'
     # -------------------------------------------------------------------------
 
     def ConcentricFillVias(self):
+        self._resolve_clearance()
         wxPrint("Calculate placement areas")
 
         zones = [zone for zone in self.pcb.Zones() if zone.GetNetname() == self.netname]
@@ -525,6 +550,10 @@ STEP         = '-'
     # -------------------------------------------------------------------------
 
     def Run(self):
+        # Must be first: bumps self.clearance to board-rule minimum so every
+        # downstream check automatically respects DRC.
+        self._resolve_clearance()
+
         VIA_GROUP_NAME = "ViaStitching {}".format(self.netname)
 
         if self.debug:
@@ -699,13 +728,16 @@ STEP         = '-'
         # Build collision obstacles with proper geometry (via radius + clearance)
         wxPrint("Building collision obstacles...")
         via_r = int(self.size / 2)
+        # self.clearance has already been resolved to max(user value, board minimum)
+        # by _resolve_clearance() at the top of Run().
         min_gap = int(self.clearance)
 
         # Tracks and existing vias: use real segment-distance check.
         # Rules:
-        #   same-net VIA   → prevent physical overlap only (min_dist = new_r + existing_r)
-        #   same-net TRACK → skip entirely (no DRC violation, copper is same net)
-        #   diff-net item  → enforce full clearance
+        #   same-net VIA   → enforce clearance so new vias don't crowd existing ones
+        #   same-net TRACK → skip (no DRC violation; copper is same net)
+        #   diff-net item  → enforce full clearance, using the stricter of board
+        #                    minimum and the track's own net-class clearance
         track_obstacles = []
         for track in all_tracks:
             is_via = track.GetClass() == "PCB_VIA"
@@ -717,27 +749,75 @@ STEP         = '-'
                     continue
 
             t_r = int(track.GetWidth() / 2)
+
             if same_net:
-                # Same net: just prevent the copper rings from touching/overlapping
-                min_dist = via_r + t_r
+                if is_via:
+                    # Same-net via: keep clearance so new vias don't stack on top
+                    # of existing ones.  (DRC doesn't require this, but without it
+                    # vias are placed with zero air-gap between copper rings.)
+                    min_dist = via_r + t_r + min_gap
+                else:
+                    # Same-net trace treated as obstacle: physical overlap only
+                    min_dist = via_r + t_r
             else:
-                # Different net: full via-edge-to-track-edge clearance
-                min_dist = via_r + t_r + min_gap
+                # Different net: full via-edge-to-track-edge clearance.
+                # Also honour the track's own net-class clearance if it is
+                # stricter than the board-level minimum.
+                track_gap = min_gap
+                try:
+                    tn = track.GetNet()
+                    if tn:
+                        nc = tn.GetNetClass()
+                        if nc:
+                            track_gap = max(track_gap, nc.GetClearance())
+                except Exception:
+                    pass
+                min_dist = via_r + t_r + track_gap
 
             seg = SEG(track.GetStart(), track.GetEnd())
             bbox = track.GetBoundingBox().GetInflated(int(min_dist))
             track_obstacles.append((seg, min_dist, bbox))
 
-        # Pads: different-net pads require full clearance; same-net pads just
-        # avoid placing a via physically inside the pad copper (looks wrong and
-        # confuses DRC even though it is electrically fine).
+        # Hole-to-hole clearance from design settings (separate DRC rule from copper clearance).
+        # Try the KiCad attribute name; fall back to copper clearance if not found.
+        via_drill_r = int(self.drill / 2)
+        try:
+            hole_clearance = max(min_gap, self.pcb.GetDesignSettings().m_MinHoleSeparation)
+        except AttributeError:
+            try:
+                hole_clearance = max(min_gap, self.pcb.GetDesignSettings().m_HoleClearance)
+            except AttributeError:
+                hole_clearance = min_gap
+
+        # Pads: two independent checks per pad candidate position.
+        #
+        # 1. Copper-overlap check (rectangular bbox):
+        #    - same-net pad  → margin = via_r  (via copper must not overlap pad copper;
+        #      previously margin=0 allowed the via ring to overlap since only the center
+        #      had to be inside the raw bbox)
+        #    - diff-net pad  → margin = via_r + min_gap
+        #
+        # 2. Drill-to-drill check (circular, for TH/NPTH pads):
+        #    Even when the copper check passes, the via drill can be too close to the
+        #    pad drill hole — a distinct DRC rule (hole-to-hole separation).
+        #    min_dist = pad_drill_r + via_drill_r + hole_clearance
         pad_obstacles = []
         for pad in all_pads:
             same = pad.GetNetname() == self.netname
-            margin = 0 if same else via_r + min_gap
-            # For same-net: only block if via center falls inside the raw pad bbox
-            bbox = pad.GetBoundingBox().GetInflated(int(margin))
-            pad_obstacles.append((bbox, same))
+            margin = via_r if same else via_r + min_gap
+            copper_bbox = pad.GetBoundingBox().GetInflated(int(margin))
+
+            # Drill check: only TH / NPTH pads have a drill size
+            drill_min_dist = 0
+            try:
+                d = pad.GetDrillSize()
+                if d.x > 0:
+                    pad_drill_r = int(max(d.x, d.y) / 2)
+                    drill_min_dist = pad_drill_r + via_drill_r + hole_clearance
+            except Exception:
+                pass
+
+            pad_obstacles.append((copper_bbox, drill_min_dist, VECTOR2I(pad.GetPosition())))
 
         # Copper-text drawings — treat like a track clearance obstacle
         drawing_obstacles = [
@@ -763,9 +843,12 @@ STEP         = '-'
                 if rectangle[x][y] != cell:
                     continue
 
-                # Pads: expanded-bbox check
-                for bbox, same in pad_obstacles:
-                    if bbox.Contains(p):
+                # Pads: copper-overlap bbox + drill-to-drill distance
+                for copper_bbox, drill_min_dist, pad_pos in pad_obstacles:
+                    if copper_bbox.Contains(p):
+                        rectangle[x][y] = self.REASON_PAD
+                        break
+                    if drill_min_dist > 0 and (p - pad_pos).EuclideanNorm() < drill_min_dist:
                         rectangle[x][y] = self.REASON_PAD
                         break
                 if rectangle[x][y] != cell:
@@ -818,15 +901,17 @@ STEP         = '-'
 # -------------------------------------------------------------------------
 
 def RunViaStitchingInteractive():
+    board_clearance_mm = 0.2
     try:
         board = pcbnew.GetBoard()
-        nets = sorted([
-            n for n in board.GetNetsByName().keys() if n
-        ])
+        nets = sorted([n for n in board.GetNetsByName().keys() if n])
+        board_min = board.GetDesignSettings().m_MinClearance
+        if board_min > 0:
+            board_clearance_mm = pcbnew.ToMM(board_min)
     except Exception:
         nets = []
 
-    dlg = ViaStitchingDialog(nets)
+    dlg = ViaStitchingDialog(nets, board_clearance_mm=board_clearance_mm)
     if dlg.ShowModal() != wx.ID_OK:
         dlg.Destroy()
         return
@@ -836,6 +921,7 @@ def RunViaStitchingInteractive():
         via_drill = float(dlg.drill.GetValue())
         spacing = float(dlg.spacing.GetValue())
         netname = dlg.netname.GetValue().strip()
+        clearance = float(dlg.clearance.GetValue())
     except ValueError as e:
         wx.MessageBox("Invalid input: {}".format(e), "Error", wx.OK | wx.ICON_ERROR)
         dlg.Destroy()
@@ -852,6 +938,7 @@ def RunViaStitchingInteractive():
     fa.SetSizeMM(via_size)
     fa.SetDrillMM(via_drill)
     fa.SetStepMM(spacing)
+    fa.SetClearanceMM(clearance)
     fa.SetPattern(pattern)
 
     fa.Run()

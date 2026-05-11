@@ -10,8 +10,11 @@ Useful for improving GND plane integrity, shielding, and thermal dissipation.
 - Fills any copper zone with stitching vias for a selected net
 - **Three placement patterns**: Square, Staggered, Hexagonal (hex close-pack)
 - Full DRC-aware collision detection:
-  - Respects clearance rules against tracks, pads, and other nets
-  - Avoids overlapping existing vias (same net and different net)
+  - Reads the board minimum clearance from design rules automatically — the dialog pre-fills the **Min Clearance** field with the board value and enforces it as a floor even if a lower value is entered
+  - Respects per-net-class clearances for different-net tracks and vias
+  - Enforces clearance against all tracks, pads, and vias — same-net and different-net
+  - Prevents via copper from overlapping same-net pad copper (previously only blocked positions strictly inside the raw pad bounding box)
+  - Separate drill-to-hole distance check for through-hole and NPTH pads, using the board hole-to-hole clearance rule, so stitching vias never merge their drill holes with pad holes
   - Respects keepout zones and rule areas
   - Respects board edge clearance
 - Interactive dialog populated with nets from the live board
@@ -63,6 +66,7 @@ The plugin will appear under **Tools → External Plugins → Via Stitching Tool
 | Via Diameter | Outer copper diameter of the via | 0.6 mm |
 | Drill | Drill hole size | 0.3 mm |
 | Spacing | Centre-to-centre distance between vias | 1.0 – 2.54 mm |
+| Min Clearance | Minimum edge-to-edge gap between via copper and any other copper. Pre-filled from the board's design-rule minimum; cannot go below the board rule at runtime. | from board rules |
 | Net Name | The net to stitch (dropdown lists all board nets) | GND |
 | Pattern | Grid arrangement (see below) | Hexagonal |
 
